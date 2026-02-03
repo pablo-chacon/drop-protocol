@@ -63,6 +63,14 @@ Official DROP Protocol contract addresses:
 
 ---
 
+## **Micro-Logistics example** 
+
+Fractional Logistics conceptual workflow:
+
+[micro-logistics.md](https://github.com/pablo-chacon/drop-protocol/blob/main/docs/micro-logisitcs.md)
+
+---
+
 ## **Start building**
 
 Platform scaffolding, examples, and integrations are provided separately.
