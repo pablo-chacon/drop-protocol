@@ -1,158 +1,309 @@
+
+---
+
 # DROP Protocol Whitepaper
+
+### Trustless, Universal Storage Settlement (Mainnet-Ready)
 
 ## Abstract
 
-DROP is a minimal blockchain protocol that defines **on-chain settlement of storage state transitions**.
+DROP Protocol is a minimal, production-ready settlement layer for decentralized storage systems.
 
-The protocol records only two canonical events:
+It defines a deterministic on-chain state machine for **storage responsibility transitions**.  
+The protocol records only:
 
-- an item enters storage
-- an item exits storage
+- when an object or container enters storage
+- when an object or container exits storage
 
-All economic coordination, pricing, identity, and operational behavior
-is intentionally left off-chain.
+All pricing, coordination, custody rules, ownership semantics, routing, and business logic are handled **off-chain** by independent platforms.
 
-DROP is neutral infrastructure.
-
----
-
-## Design Goals
-
-DROP is designed to:
-
-- be maximally minimal
-- be chain-agnostic at the protocol level
-- be currency and payment-medium agnostic
-- enable composability with other protocols
-- minimize legal and operational liability
-- avoid governance and upgrade complexity
-- remain usable for decades without modification
+DROP is not a storage service.  
+It is neutral settlement infrastructure.
 
 ---
 
-## Non-Goals
+## 1. Introduction
 
-DROP explicitly avoids:
+Physical storage is a foundational component of logistics, supply chains, and commerce, yet it is almost always coordinated through centralized systems.
 
-- marketplace mechanics
-- discovery algorithms
-- storage pricing models
-- ranking or reputation systems
-- identity frameworks
-- arbitration logic
-- custody enforcement
-- regulatory interpretation
+These systems typically combine:
 
-Any system requiring the above must implement them **off-chain**.
+- custody records
+- pricing models
+- access control
+- settlement
+- inventory reconciliation
+
+This coupling creates opacity, lock-in, and high coordination overhead.
+
+DROP Protocol addresses this by focusing **exclusively on the settlement rail** for storage events:
+
+- Who was responsible for holding something?
+- For how long?
+- Under what finalized conditions is settlement allowed?
+
+All other concerns are explicitly out of scope.
+
+The protocol encodes only a small, auditable state machine and optional escrow settlement logic.
 
 ---
 
-## Core Primitives
+## 2. Design Goals
 
-### Space Registry
+DROP is designed to be:
 
-A space registry entry is a declarative advertisement containing:
+* **Minimal**: One narrowly scoped settlement layer.
+* **Neutral**: Not a platform, marketplace, or operator.
+* **Payment-medium agnostic**: Supports on-chain escrow or off-chain settlement.
+* **Composable**: Designed to interoperate with other protocols without coupling.
+* **Final**: No upgrade path or governance extensions.
+* **Legible**: Deterministic state and events suitable for indexing and auditing.
+* **Low-liability**: Avoids encoding custody, ownership, or regulatory logic.
+
+Any off-chain workflows described in this document are illustrative only and are **not required, enforced, or validated** by DROP Protocol.
+
+---
+
+## 3. System Overview
+
+The canonical DROP Protocol deployment consists of two contracts:
+
+1. **DROPSpaceRegistry**
+2. **DROPCore**
+
+An optional reusable **Escrow** contract may be used for on-chain settlement.
+
+The protocol is chain-agnostic across EVM networks and is implemented using Solidity 0.8.24.
+
+### 3.1 Canonical Deployment
+
+DROP Protocol is intended for Ethereum mainnet deployment.
+
+The canonical deployment is immutable and permissionless.  
+No upgrades or governance actions are possible after deployment.
+
+---
+
+## 4. Core Components
+
+### 4.1 DROPSpaceRegistry: Storage Availability Declaration
+
+`DROPSpaceRegistry` is a declarative on-chain registry of storage spaces.
+
+Each registered space includes:
 
 - operator address
 - coarse location commitment
-- capacity and availability
+- total capacity and available capacity
 - optional availability window
-- hash of off-chain terms
+- hash commitment to off-chain terms
 
-This allows platforms to discover capacity without embedding business logic.
+The registry does not include:
 
----
+- pricing
+- ranking
+- matching
+- access control
+- inventory logic
 
-### Storage Session
-
-A storage session is a simple state machine:
-
----
-
-
-Each transition records a timestamp.
-Optional evidence hashes may be anchored.
-
-No assumptions are made about what is stored.
+Its sole purpose is to advertise availability and track capacity reservations initiated by `DROPCore`.
 
 ---
 
-## Settlement
+### 4.2 DROPCore: Storage State Machine and Settlement
 
-Settlement is optional and external to the protocol.
+`DROPCore` is the settlement engine.
 
-Two models are supported:
+Each storage session is represented as an ERC-721 token and follows a simple lifecycle:
 
-1. On-chain escrow using ETH or ERC-20 tokens
-2. Off-chain settlement using any medium
+```
 
-The protocol never enforces or interprets off-chain payments.
-Optional hashes may be anchored for auditability.
+Created -> Dropped -> Picked -> Finalized
+
+```
+
+Each session records:
+
+- `storageId`
+- `spaceId`
+- lifecycle state
+- timestamps for each transition
+- optional evidence hashes
+- optional escrow parameters
+
+The protocol does not assume anything about the object being stored.
 
 ---
 
-## Protocol Fee
+### 4.3 Escrow: Optional Value Settlement
+
+DROP supports optional on-chain escrow for ETH and ERC-20 tokens.
+
+Escrow behavior:
+
+- funds are locked at session creation
+- funds are released or refunded at finalization
+- protocol fee is applied only when escrow is used
+
+Off-chain settlement using any payment medium is fully supported.  
+In that case, the protocol records state only.
+
+---
+
+## 5. Storage Session Lifecycle
+
+### 5.1 Creation
+
+A platform creates a storage session by minting a storage NFT and specifying:
+
+- `spaceId`
+- optional picker address
+- optional escrow token and amount
+- optional off-chain settlement reference hash
+
+If escrow is used, funds are locked at this stage.
+
+State: **Created**
+
+---
+
+### 5.2 Drop
+
+A participant records that the object has entered storage.
+
+- capacity is reserved in `DROPSpaceRegistry`
+- timestamp and optional evidence hashes are recorded
+
+State: **Dropped**
+
+---
+
+### 5.3 Pick
+
+A participant records that the object has exited storage.
+
+- capacity is released in `DROPSpaceRegistry`
+- timestamp and optional evidence hashes are recorded
+
+State: **Picked**
+
+---
+
+### 5.4 Finalization
+
+After pick, anyone may call `finalize(storageId)`.
+
+If escrow was used:
+
+- funds are released to the storage operator
+- immutable protocol fee is paid to the protocol treasury
+- optional finalizer tip is paid
+
+If escrow was not used:
+
+- state is finalized without settlement
+
+State: **Finalized**
+
+---
+
+## 6. Fees and Economics
+
+### 6.1 Protocol Fee
 
 When escrow is used, DROP enforces a fixed protocol fee:
 
-- 0.5% of escrowed amount
+- 0.5% of the escrowed amount
 - immutable
-- routed to protocol treasury
+- routed to the protocol treasury
 - collected at finalize time
 
-No fee is collected for off-chain settlements.
+No protocol fee is collected for off-chain settlements.
+
+### 6.2 Platform Economics
+
+DROP does not encode:
+
+- pricing
+- billing duration
+- penalties
+- incentives
+
+All economic policies are platform-defined and off-chain.
 
 ---
 
-## Composability
+## 7. Security Model
 
-DROP is designed to compose with:
+Key security properties:
 
-- transport protocols
-- logistics protocols
-- supply chain systems
-- private coordination platforms
+- no upgradeability
+- no governance hooks
+- minimal trusted surface
+- escrow callable only by `DROPCore`
+- deterministic lifecycle and settlement
+- permissionless finalization
 
-Protocols remain isolated and unaware of each other.
+The `owner` role should be held by:
 
----
-
-## Security Model
-
-DROP minimizes attack surface by:
-
-- avoiding complex logic
-- avoiding dynamic pricing
-- avoiding oracles
-- avoiding governance hooks
-- avoiding upgradeability
-
-Security is achieved through simplicity.
+- a multisig
+- a Safe
+- or be fully renounced
 
 ---
 
-## Legal Positioning
+## 8. What DROP Is and Is Not
 
-DROP is neutral protocol infrastructure.
+### 8.1 DROP Is
 
-The protocol:
+- a storage settlement rail
+- an auditable on-chain state machine
+- neutral infrastructure
 
-- does not operate storage facilities
-- does not provide custodial services
-- does not intermediate transactions
-- does not collect personal data
-- does not perform KYC or AML
-- does not guarantee outcomes
+### 8.2 DROP Is Not
 
-All liability resides with platform operators and users.
+- a storage provider
+- a warehouse operator
+- a marketplace
+- a custody system
+- an inventory tracker
+- a compliance framework
 
 ---
 
-## Conclusion
+## 9. Legal Position and Responsibility Boundary
 
-DROP provides a permanent, neutral settlement layer for storage events.
+DROP is open-source software deployed on public blockchains.
 
-It does not attempt to solve logistics, economics, or governance.
-It provides a stable foundation upon which others may build.
+The authors:
+
+- do not operate storage facilities
+- do not control stored items
+- do not enforce custody rules
+- do not intermediate payments
+- do not collect personal data
+- do not provide regulatory compliance
+
+All responsibility rests with:
+
+- contract deployers
+- platform operators
+- storage operators
+- users
+
+This is analogous to general-purpose infrastructure such as blockchain nodes or peer-to-peer networking software.
+
+---
+
+## 10. Conclusion
+
+DROP Protocol is a canonical, minimal implementation of a **trustless storage settlement rail**.
+
+It deliberately avoids modeling ownership, custody, pricing, or coordination.
+
+By remaining narrow, deterministic, and final, DROP provides stable infrastructure that others may build on without permission or coordination.
 
 DROP is finished infrastructure.
+
+---
+

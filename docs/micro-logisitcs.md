@@ -24,7 +24,7 @@ This works precisely because:
 - DROP models **storage responsibility**
 - Neither protocol models ownership, inventory, routing, or coordination
 
-The protocols never try to be “the supply chain”.
+The protocols never is the supply chain.
 
 ---
 
@@ -118,7 +118,6 @@ No protocol ever needs to know:
 - global state
 
 The workflow pattern is independently repeatable until the "phone" reach it's destination.
-
 
 ---
 
