@@ -11,15 +11,15 @@ import "@openzeppelin/contracts/access/Ownable2Step.sol";
 /// @dev Keep this contract boring and dumb. Everything else is off-chain.
 contract DROPSpaceRegistry is Ownable2Step {
     struct Space {
-        address operator;            // space operator (who ultimately receives settlement off DROPCore finalize)
-        bool    active;              // space enabled/disabled by operator
-        bytes32 coarseLocationHash;  // coarse cell hash; never a precise address
-        bytes32 termsHash;           // hash(commitment) of off-chain terms/rules/pricing/SLA/access
-        uint64  availableFrom;       // optional; 0 means "immediately"
-        uint64  availableTo;         // optional; 0 means "no end"
-        uint64  capacityTotal;       // total units
-        uint64  capacityAvailable;   // available units
-        string  metadataCid;         // optional: IPFS/Arweave CID (or empty)
+        address operator; // space operator (receives settlement off DROPCore finalize)
+        bool active; // space enabled/disabled by operator
+        bytes32 coarseLocationHash; // coarse cell hash; never a precise address
+        bytes32 termsHash; // hash(commitment) of off-chain terms/rules/pricing/SLA/access
+        uint64 availableFrom; // optional; 0 means "immediately"
+        uint64 availableTo; // optional; 0 means "no end"
+        uint64 capacityTotal; // total units
+        uint64 capacityAvailable; // available units
+        string metadataCid; // optional: IPFS/Arweave CID (or empty)
     }
 
     mapping(uint256 => Space) public spaces;
@@ -45,8 +45,13 @@ contract DROPSpaceRegistry is Ownable2Step {
 
     constructor() Ownable(msg.sender) {}
 
-    /// @notice Set DROPCore address (one-time or updatable by owner).
-    /// @dev Kept owner-controlled so deployments can be staged and then locked operationally.
+    /// @notice Helper getter for operator address, used by DROPCore gating.
+    function getOperator(uint256 spaceId) external view returns (address) {
+        return spaces[spaceId].operator;
+    }
+
+    /// @notice Set DROPCore address (updatable by owner).
+    /// @dev If you want to freeze this, renounce ownership after setting.
     function setCore(address core) external onlyOwner {
         require(core != address(0), "core-zero");
         dropCore = core;
@@ -58,9 +63,9 @@ contract DROPSpaceRegistry is Ownable2Step {
     function registerSpace(
         bytes32 coarseLocationHash,
         bytes32 termsHash,
-        uint64  availableFrom,
-        uint64  availableTo,
-        uint64  capacityTotal,
+        uint64 availableFrom,
+        uint64 availableTo,
+        uint64 capacityTotal,
         string calldata metadataCid
     ) external returns (uint256 spaceId) {
         require(capacityTotal > 0, "cap-zero");
@@ -68,15 +73,16 @@ contract DROPSpaceRegistry is Ownable2Step {
 
         spaceId = nextSpaceId++;
         Space storage s = spaces[spaceId];
-        s.operator          = msg.sender;
-        s.active            = true;
-        s.coarseLocationHash= coarseLocationHash;
-        s.termsHash         = termsHash;
-        s.availableFrom     = availableFrom;
-        s.availableTo       = availableTo;
-        s.capacityTotal     = capacityTotal;
+
+        s.operator = msg.sender;
+        s.active = true;
+        s.coarseLocationHash = coarseLocationHash;
+        s.termsHash = termsHash;
+        s.availableFrom = availableFrom;
+        s.availableTo = availableTo;
+        s.capacityTotal = capacityTotal;
         s.capacityAvailable = capacityTotal;
-        s.metadataCid       = metadataCid;
+        s.metadataCid = metadataCid;
 
         emit SpaceRegistered(spaceId, msg.sender);
         emit SpaceUpdated(spaceId);
@@ -90,18 +96,18 @@ contract DROPSpaceRegistry is Ownable2Step {
         uint256 spaceId,
         bytes32 coarseLocationHash,
         bytes32 termsHash,
-        uint64  availableFrom,
-        uint64  availableTo,
+        uint64 availableFrom,
+        uint64 availableTo,
         string calldata metadataCid
     ) external onlyOperator(spaceId) {
         Space storage s = spaces[spaceId];
         if (availableTo != 0) require(availableTo > availableFrom, "bad-window");
 
         s.coarseLocationHash = coarseLocationHash;
-        s.termsHash          = termsHash;
-        s.availableFrom      = availableFrom;
-        s.availableTo        = availableTo;
-        s.metadataCid        = metadataCid;
+        s.termsHash = termsHash;
+        s.availableFrom = availableFrom;
+        s.availableTo = availableTo;
+        s.metadataCid = metadataCid;
 
         emit SpaceUpdated(spaceId);
     }
@@ -133,11 +139,13 @@ contract DROPSpaceRegistry is Ownable2Step {
         Space storage s = spaces[spaceId];
 
         require(s.capacityTotal >= delta, "underflow-total");
+
         // reserved = total - available
         uint64 reserved = s.capacityTotal - s.capacityAvailable;
         require(s.capacityTotal - delta >= reserved, "reserved-exceeds");
 
         s.capacityTotal -= delta;
+
         // available reduces by same delta (since reserved fixed)
         require(s.capacityAvailable >= delta, "underflow-avail");
         s.capacityAvailable -= delta;
@@ -155,7 +163,10 @@ contract DROPSpaceRegistry is Ownable2Step {
         if (s.availableTo != 0) require(uint64(block.timestamp) <= s.availableTo, "too-late");
         require(s.capacityAvailable > 0, "no-capacity");
 
-        unchecked { s.capacityAvailable -= 1; }
+        unchecked {
+            s.capacityAvailable -= 1;
+        }
+
         emit CapacityChanged(spaceId, s.capacityTotal, s.capacityAvailable);
     }
 
@@ -165,7 +176,10 @@ contract DROPSpaceRegistry is Ownable2Step {
         require(s.operator != address(0), "no-space");
         require(s.capacityAvailable < s.capacityTotal, "nothing-reserved");
 
-        unchecked { s.capacityAvailable += 1; }
+        unchecked {
+            s.capacityAvailable += 1;
+        }
+
         emit CapacityChanged(spaceId, s.capacityTotal, s.capacityAvailable);
     }
 }
