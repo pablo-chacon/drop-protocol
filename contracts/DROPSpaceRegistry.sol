@@ -4,27 +4,34 @@ pragma solidity ^0.8.24;
 import "@openzeppelin/contracts/access/Ownable2Step.sol";
 
 /// @title DROPSpaceRegistry
-/// @notice Declarative registry for storage spaces/capacity.
-/// - No pricing, ranking, identity, or matching.
-/// - Only: availability + coarse location hash + terms commitment.
-/// - Capacity reservation/release is performed by DROPCore (the "core").
-/// @dev Keep this contract boring and dumb. Everything else is off-chain.
+/// @notice Declarative on-chain registry for storage spaces.
+///
+/// Philosophy:
+///   - No pricing, ranking, matching, or identity.
+///   - Only: operator address, availability window, capacity, coarse location
+///     hash, and a hash commitment to off-chain terms/SLA/pricing.
+///   - Capacity reservation and release are gated exclusively to DROPCore
+///     to prevent griefing from external callers.
+///   - dropCore is set-once after deploy. Owner should renounce afterwards.
+///
+/// Keep this contract boring and dumb. Everything else is off-chain.
 contract DROPSpaceRegistry is Ownable2Step {
     struct Space {
-        address operator; // space operator (receives settlement off DROPCore finalize)
-        bool active; // space enabled/disabled by operator
-        bytes32 coarseLocationHash; // coarse cell hash; never a precise address
-        bytes32 termsHash; // hash(commitment) of off-chain terms/rules/pricing/SLA/access
-        uint64 availableFrom; // optional; 0 means "immediately"
-        uint64 availableTo; // optional; 0 means "no end"
-        uint64 capacityTotal; // total units
-        uint64 capacityAvailable; // available units
-        string metadataCid; // optional: IPFS/Arweave CID (or empty)
+        address operator;           // receives settlement on DROPCore finalize
+        bool active;                // operator-controlled enable/disable
+        bytes32 coarseLocationHash; // coarse cell hash — never a precise address
+        bytes32 termsHash;          // hash(off-chain terms / SLA / pricing / access rules)
+        uint64 availableFrom;       // 0 = immediately
+        uint64 availableTo;         // 0 = no end
+        uint64 capacityTotal;       // total units
+        uint64 capacityAvailable;   // currently available units
+        string metadataCid;         // optional IPFS/Arweave CID
     }
 
     mapping(uint256 => Space) public spaces;
     uint256 public nextSpaceId = 1;
 
+    /// @notice DROPCore address. Set-once after deploy.
     address public dropCore;
 
     event CoreSet(address core);
@@ -45,21 +52,23 @@ contract DROPSpaceRegistry is Ownable2Step {
 
     constructor() Ownable(msg.sender) {}
 
-    /// @notice Helper getter for operator address, used by DROPCore gating.
-    function getOperator(uint256 spaceId) external view returns (address) {
-        return spaces[spaceId].operator;
-    }
-
-    /// @notice Set DROPCore address (updatable by owner).
-    /// @dev If you want to freeze this, renounce ownership after setting.
+    /// @notice Set DROPCore address. Can only be set once.
+    /// @dev After setting, owner should renounce ownership.
     function setCore(address core) external onlyOwner {
         require(core != address(0), "core-zero");
+        require(dropCore == address(0), "core-already-set");
         dropCore = core;
         emit CoreSet(core);
     }
 
-    /// @notice Register a new space. Returns the assigned spaceId.
-    /// @dev Operator is msg.sender. Capacity must be > 0.
+    /// @notice Convenience getter for operator address, used by DROPCore gating.
+    function getOperator(uint256 spaceId) external view returns (address) {
+        return spaces[spaceId].operator;
+    }
+
+    /// @notice Register a new storage space.
+    /// @dev Operator is msg.sender. capacityTotal must be > 0.
+    /// @return spaceId The assigned space identifier.
     function registerSpace(
         bytes32 coarseLocationHash,
         bytes32 termsHash,
@@ -74,15 +83,15 @@ contract DROPSpaceRegistry is Ownable2Step {
         spaceId = nextSpaceId++;
         Space storage s = spaces[spaceId];
 
-        s.operator = msg.sender;
-        s.active = true;
+        s.operator        = msg.sender;
+        s.active          = true;
         s.coarseLocationHash = coarseLocationHash;
-        s.termsHash = termsHash;
-        s.availableFrom = availableFrom;
-        s.availableTo = availableTo;
-        s.capacityTotal = capacityTotal;
+        s.termsHash       = termsHash;
+        s.availableFrom   = availableFrom;
+        s.availableTo     = availableTo;
+        s.capacityTotal   = capacityTotal;
         s.capacityAvailable = capacityTotal;
-        s.metadataCid = metadataCid;
+        s.metadataCid     = metadataCid;
 
         emit SpaceRegistered(spaceId, msg.sender);
         emit SpaceUpdated(spaceId);
@@ -90,8 +99,7 @@ contract DROPSpaceRegistry is Ownable2Step {
         emit CapacityChanged(spaceId, capacityTotal, capacityTotal);
     }
 
-    /// @notice Update non-capacity fields for a space.
-    /// @dev Operator-controlled.
+    /// @notice Update non-capacity metadata for a space.
     function updateSpace(
         uint256 spaceId,
         bytes32 coarseLocationHash,
@@ -100,86 +108,68 @@ contract DROPSpaceRegistry is Ownable2Step {
         uint64 availableTo,
         string calldata metadataCid
     ) external onlyOperator(spaceId) {
-        Space storage s = spaces[spaceId];
         if (availableTo != 0) require(availableTo > availableFrom, "bad-window");
 
+        Space storage s = spaces[spaceId];
         s.coarseLocationHash = coarseLocationHash;
-        s.termsHash = termsHash;
-        s.availableFrom = availableFrom;
-        s.availableTo = availableTo;
-        s.metadataCid = metadataCid;
+        s.termsHash       = termsHash;
+        s.availableFrom   = availableFrom;
+        s.availableTo     = availableTo;
+        s.metadataCid     = metadataCid;
 
         emit SpaceUpdated(spaceId);
     }
 
-    /// @notice Enable/disable space.
+    /// @notice Enable or disable a space.
     function setActive(uint256 spaceId, bool active) external onlyOperator(spaceId) {
         spaces[spaceId].active = active;
         emit SpaceStatus(spaceId, active);
     }
 
-    /// @notice Increase total capacity (and available capacity) by delta.
-    /// @dev Operator-controlled.
+    /// @notice Increase total and available capacity by delta.
     function increaseCapacity(uint256 spaceId, uint64 delta) external onlyOperator(spaceId) {
         require(delta > 0, "delta-zero");
         Space storage s = spaces[spaceId];
-
-        unchecked {
-            s.capacityTotal += delta;
-            s.capacityAvailable += delta;
-        }
-
+        s.capacityTotal     += delta;
+        s.capacityAvailable += delta;
         emit CapacityChanged(spaceId, s.capacityTotal, s.capacityAvailable);
     }
 
-    /// @notice Decrease total capacity by delta.
-    /// @dev Operator-controlled. Must not dip below reserved capacity.
+    /// @notice Decrease total capacity by delta. Cannot dip below currently reserved units.
     function decreaseCapacity(uint256 spaceId, uint64 delta) external onlyOperator(spaceId) {
         require(delta > 0, "delta-zero");
         Space storage s = spaces[spaceId];
-
         require(s.capacityTotal >= delta, "underflow-total");
 
-        // reserved = total - available
         uint64 reserved = s.capacityTotal - s.capacityAvailable;
         require(s.capacityTotal - delta >= reserved, "reserved-exceeds");
-
-        s.capacityTotal -= delta;
-
-        // available reduces by same delta (since reserved fixed)
         require(s.capacityAvailable >= delta, "underflow-avail");
-        s.capacityAvailable -= delta;
 
+        s.capacityTotal     -= delta;
+        s.capacityAvailable -= delta;
         emit CapacityChanged(spaceId, s.capacityTotal, s.capacityAvailable);
     }
 
-    /// @notice Reserve 1 unit of capacity for an active, currently-available space.
-    /// @dev Only DROPCore may reserve/release. This prevents direct griefing.
+    /// @notice Reserve 1 capacity unit for an active, currently-available space.
+    /// @dev Only DROPCore may call. Prevents external griefing.
     function reserveOne(uint256 spaceId) external onlyCore {
         Space storage s = spaces[spaceId];
         require(s.operator != address(0), "no-space");
         require(s.active, "inactive");
         if (s.availableFrom != 0) require(uint64(block.timestamp) >= s.availableFrom, "too-early");
-        if (s.availableTo != 0) require(uint64(block.timestamp) <= s.availableTo, "too-late");
+        if (s.availableTo   != 0) require(uint64(block.timestamp) <= s.availableTo,   "too-late");
         require(s.capacityAvailable > 0, "no-capacity");
-
-        unchecked {
-            s.capacityAvailable -= 1;
-        }
-
+        unchecked { s.capacityAvailable -= 1; }
         emit CapacityChanged(spaceId, s.capacityTotal, s.capacityAvailable);
     }
 
-    /// @notice Release 1 unit of capacity back to the space.
+    /// @notice Release 1 capacity unit back to the space.
+    /// @dev Only DROPCore may call.
     function releaseOne(uint256 spaceId) external onlyCore {
         Space storage s = spaces[spaceId];
         require(s.operator != address(0), "no-space");
         require(s.capacityAvailable < s.capacityTotal, "nothing-reserved");
-
-        unchecked {
-            s.capacityAvailable += 1;
-        }
-
+        unchecked { s.capacityAvailable += 1; }
         emit CapacityChanged(spaceId, s.capacityTotal, s.capacityAvailable);
     }
 }

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
+import "@openzeppelin/contracts/token/ERC721/ERC721.sol";
 import "@openzeppelin/contracts/access/Ownable2Step.sol";
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 interface IDROPSpaceRegistry {
     function spaces(uint256 spaceId)
@@ -21,7 +21,6 @@ interface IDROPSpaceRegistry {
         );
 
     function getOperator(uint256 spaceId) external view returns (address);
-
     function reserveOne(uint256 spaceId) external;
     function releaseOne(uint256 spaceId) external;
 }
@@ -31,7 +30,7 @@ interface IEscrow {
 
     function releaseWithFees(
         uint256 id,
-        address payTo,
+        address operator,
         address platformFeeTo,
         uint16 platformFeeBps,
         address protocolFeeTo,
@@ -44,100 +43,176 @@ interface IEscrow {
 }
 
 /// @title DROPCore
-/// @notice Storage settlement core.
-/// - State transitions only: Created -> Dropped -> Picked -> Finalized (-> Disputed optional)
-/// - Storage operator (registry) attests drop and pick on-chain.
-/// - Payment medium is a platform concern:
-///   - Optional on-chain escrow via IEscrow for ETH/ERC20 on this chain
-///   - Off-chain payments can be anchored via hashes (without escrow)
-/// - Immutable protocol fee: 0.5% to protocolTreasury
-contract DROPCore is Ownable2Step {
+/// @notice Trustless settlement core for decentralized P2P storage.
+///
+/// ## Roles
+///   - Dropper  : deposits an item into the storage space.
+///                Creates the session and funds escrow.
+///   - Operator : the registered storage provider. Trusted third party.
+///                Attests drop() (item arrived) and pick() (item left).
+///   - Picker   : retrieves the item. Calls confirmPickup() as Proof-of-Custody.
+///                Dropper and picker MAY be the same address — protocol is neutral.
+///
+/// ## Settlement
+///   Escrow releases to the storage operator when:
+///     (a) picker calls confirmPickup(), explicit Proof-of-Custody, OR
+///     (b) 48 hours elapse after pick(), permissionless timeout finalize.
+///   If no escrow was used, finalize() records state only; settlement is off-chain.
+///
+/// ## No disputes, no arbitration, no admin intervention
+///   DROP does not adjudicate disputes. That is a platform concern.
+///   Economic enforcement is natural: the operator is only paid after pick() is
+///   attested. If the operator behaves fraudulently, platforms handle consequences
+///   off-chain. The protocol does not need to.
+///   The only owner-controlled parameter is finalizeTipBps (liveness incentive,
+///   capped at 1%). Owner may renounce after deploy for full immutability.
+///
+/// ## NFT
+///   Each storage session is an ERC-721 token.
+///   Non-speculative infrastructure: possession = authority to advance state.
+///
+/// ## Protocol fee
+///   Immutable 0.5% to protocolTreasury.
+///   Platform fee is always 0 at protocol level, platform economics are off-chain.
+///
+/// ## Philosophy
+///   Minimal. Neutral. Permissionless. Finished.
+///   DROP does not route, price, match, identify, or arbitrate. Platforms do that.
+contract DROPCore is ERC721, Ownable2Step {
+
+    // State machine 
     enum State {
-        None,
-        Created,
-        Dropped,
-        Picked,
-        Finalized,
-        Disputed
+        None,      // storageId not yet created
+        Created,   // session created, item not yet in storage
+        Dropped,   // operator attested item is in storage (capacity reserved)
+        Picked,    // operator attested item has left storage (capacity released)
+        Finalized  // settlement complete (or state-only if no escrow)
     }
 
+    // Storage session
     struct StorageSession {
         uint256 spaceId;
 
-        address platform; // creator / payer (if escrowed) or initiator (if off-chain)
-
-        // Optional informational field only. Not enforced on-chain because operator attests pick.
-        address picker;
+        address dropper;  // created session + funded escrow
+        address picker;   // expected picker (informational; not enforced on-chain)
+                          // dropper == picker is valid — protocol is neutral
 
         State state;
 
         uint64 createdAt;
         uint64 droppedAt;
         uint64 pickedAt;
-        uint64 finalizeAfter;
+        uint64 finalizeAfter; // pickedAt + 48h; permissionless finalize after this
 
-        // Optional evidence anchors (keep neutral: hashes only)
-        bytes32 dropCellHash; // coarse
-        bytes32 pickCellHash; // coarse
-        bytes32 evidenceHash; // generic: photo digest / seal digest / sensor digest
-        string evidenceCid; // optional off-chain blob CID
+        // Evidence anchors — hashes only, content lives off-chain
+        bytes32 dropEvidenceHash; // e.g. seal digest, photo digest, sensor reading
+        bytes32 pickEvidenceHash;
+        string  dropEvidenceCid;  // optional IPFS/Arweave CID
+        string  pickEvidenceCid;
 
         // Optional on-chain escrow
-        address escrowToken; // address(0) => ETH
-        uint256 escrowAmount; // 0 => no on-chain escrow (off-chain settlement)
-        bool escrowed; // set true if escrow.fund called
+        address escrowToken;  // address(0) = ETH
+        uint256 escrowAmount; // 0 = off-chain settlement only
+        bool    escrowed;
 
-        // Optional off-chain settlement reference (hash)
-        bytes32 settlementRefHash; // hash(txid, invoice ref, receipt, etc.)
+        // Optional off-chain settlement reference
+        bytes32 settlementRefHash; // hash(invoice / txid / receipt / etc.)
     }
 
     mapping(uint256 => StorageSession) public sessions;
 
+    // Immutable config
     IDROPSpaceRegistry public immutable registry;
-    IEscrow public immutable escrow; // may be address(0) to disable escrow usage at protocol level
+    IEscrow            public immutable escrow; // may be address(0) to disable escrow
 
     address public immutable protocolTreasury;
-    uint16 public constant PROTOCOL_FEE_BPS = 50; // 0.5%
+    uint16  public constant  PROTOCOL_FEE_BPS = 30; // 0.3%, immutable
 
-    // Permissionless finalize caller tip (bps of escrow) for liveness, capped small.
+    // Permissionless finalizer tip, tiny incentive for liveness bots.
+    // Owner-adjustable up to 1%. Owner may renounce after deploy.
     uint16 public finalizeTipBps = 5; // 0.05%
 
-    event SessionCreated(uint256 indexed storageId, uint256 indexed spaceId, address indexed platform, address picker);
-    event Dropped(uint256 indexed storageId, uint64 t, bytes32 dropCellHash, bytes32 evidenceHash, string evidenceCid);
-    event Picked(uint256 indexed storageId, uint64 t, bytes32 pickCellHash, bytes32 evidenceHash, string evidenceCid);
-    event Finalized(uint256 indexed storageId, address operator);
-    event Disputed(uint256 indexed storageId, bytes32 reasonHash);
-    event Resolved(uint256 indexed storageId, address winner);
+    // Picker must confirm OR this many seconds must elapse after pick()
+    uint64 public constant FINALIZE_WINDOW = 48 hours;
+
+    // Events
+    event SessionCreated(
+        uint256 indexed storageId,
+        uint256 indexed spaceId,
+        address indexed dropper,
+        address picker
+    );
+    event Dropped(
+        uint256 indexed storageId,
+        uint64  t,
+        bytes32 evidenceHash,
+        string  evidenceCid
+    );
+    event Picked(
+        uint256 indexed storageId,
+        uint64  t,
+        bytes32 evidenceHash,
+        string  evidenceCid,
+        uint64  finalizeAfter
+    );
+    event PickupConfirmed(
+        uint256 indexed storageId,
+        address picker,
+        uint64  t
+    );
+    event Finalized(
+        uint256 indexed storageId,
+        address operator,
+        bool    byTimeout
+    );
     event FinalizeTipSet(uint16 bps);
 
-    constructor(address _registry, address _escrow, address _protocolTreasury) Ownable(msg.sender) {
-        require(_registry != address(0), "registry-zero");
+    // Constructor
+    constructor(
+        address _registry,
+        address _escrow,
+        address _protocolTreasury
+    )
+        ERC721("DROP Storage Session", "DROP")
+        Ownable(msg.sender)
+    {
+        require(_registry         != address(0), "registry-zero");
         require(_protocolTreasury != address(0), "proto-zero");
+        // _escrow may be address(0), escrow is optional at protocol level
 
-        registry = IDROPSpaceRegistry(_registry);
-        escrow = IEscrow(_escrow);
+        registry         = IDROPSpaceRegistry(_registry);
+        escrow           = IEscrow(_escrow);
         protocolTreasury = _protocolTreasury;
     }
 
+    // Owner config
+    /// @notice Adjust the permissionless finalizer tip. Capped at 1%.
+    /// @dev Owner may renounce after deploy to freeze this at its current value.
     function setFinalizeTipBps(uint16 bps) external onlyOwner {
         require(bps < 100, "cap-1%");
         finalizeTipBps = bps;
         emit FinalizeTipSet(bps);
     }
 
+    // Internal helpers
+    /// @dev Reverts unless msg.sender is the registered operator of spaceId.
     function _requireStorageOperator(uint256 spaceId) internal view {
-        address operator = registry.getOperator(spaceId);
-        require(operator != address(0), "no-space");
-        require(msg.sender == operator, "not-operator");
+        address op = registry.getOperator(spaceId);
+        require(op != address(0), "no-space");
+        require(msg.sender == op, "not-operator");
     }
 
-    /// @notice Create a storage session.
-    /// @param storageId Protocol-wide unique id (platform-generated).
-    /// @param spaceId Registered space to use.
-    /// @param picker Optional informational address (not enforced on-chain).
-    /// @param escrowToken address(0)=ETH, otherwise ERC20. Ignored if escrowAmount==0.
-    /// @param escrowAmount If >0, funds escrow now via IEscrow. If 0, settlement is off-chain.
-    /// @param settlementRefHash Optional hash anchoring off-chain settlement reference.
+    // Core flow
+    /// @notice Create a storage session and mint the DROP NFT.
+    ///
+    /// @param storageId         Protocol-wide unique id (platform-generated).
+    /// @param spaceId           Registered storage space to use.
+    /// @param picker            Expected picker address. Pass address(0) if unknown.
+    ///                          Dropper == picker is explicitly allowed.
+    /// @param escrowToken       address(0) = ETH; otherwise ERC20 token address.
+    ///                          Ignored when escrowAmount == 0.
+    /// @param escrowAmount      If > 0, funds escrow now. If 0, settlement is off-chain.
+    /// @param settlementRefHash Optional hash anchoring an off-chain settlement reference.
     function createStorage(
         uint256 storageId,
         uint256 spaceId,
@@ -146,26 +221,28 @@ contract DROPCore is Ownable2Step {
         uint256 escrowAmount,
         bytes32 settlementRefHash
     ) external payable {
-        StorageSession storage s = sessions[storageId];
-        require(s.state == State.None, "exists");
+        require(_ownerOf(storageId) == address(0), "exists");
 
-        // Validate space exists (operator != 0) to avoid dead sessions.
+        // Validate space exists, prevents dead sessions against unregistered spaces.
         (address operator,,,,,,,,) = registry.spaces(spaceId);
         require(operator != address(0), "no-space");
 
-        s.spaceId = spaceId;
-        s.platform = msg.sender;
-        s.picker = picker;
-        s.state = State.Created;
-        s.createdAt = uint64(block.timestamp);
+        // Mint the DROP NFT to the dropper. NFT = session authority token.
+        _safeMint(msg.sender, storageId);
+
+        StorageSession storage s = sessions[storageId];
+        s.spaceId           = spaceId;
+        s.dropper           = msg.sender;
+        s.picker            = picker;
+        s.state             = State.Created;
+        s.createdAt         = uint64(block.timestamp);
         s.settlementRefHash = settlementRefHash;
 
         if (escrowAmount > 0) {
             require(address(escrow) != address(0), "escrow-disabled");
-
-            s.escrowToken = escrowToken;
+            s.escrowToken  = escrowToken;
             s.escrowAmount = escrowAmount;
-            s.escrowed = true;
+            s.escrowed     = true;
 
             if (escrowToken == address(0)) {
                 require(msg.value == escrowAmount, "bad-value");
@@ -181,120 +258,100 @@ contract DROPCore is Ownable2Step {
         emit SessionCreated(storageId, spaceId, msg.sender, picker);
     }
 
-    /// @notice Mark the item/container as dropped into the storage space.
-    /// @dev Reserves 1 unit of space capacity.
-    /// @dev Only the registered space operator may attest this transition.
-    function drop(uint256 storageId, bytes32 dropCellHash, bytes32 evidenceHash, string calldata evidenceCid) external {
+    /// @notice Operator attests that the item has been received into storage.
+    /// @dev Reserves 1 capacity unit. Only the registered space operator may call.
+    function drop(
+        uint256 storageId,
+        bytes32 evidenceHash,
+        string calldata evidenceCid
+    ) external {
         StorageSession storage s = sessions[storageId];
         require(s.state == State.Created, "bad-state");
-
         _requireStorageOperator(s.spaceId);
 
-        // Reserve capacity at the moment of drop.
         registry.reserveOne(s.spaceId);
 
-        s.dropCellHash = dropCellHash;
-        s.evidenceHash = evidenceHash;
-        s.evidenceCid = evidenceCid;
-        s.droppedAt = uint64(block.timestamp);
-        s.state = State.Dropped;
+        s.dropEvidenceHash = evidenceHash;
+        s.dropEvidenceCid  = evidenceCid;
+        s.droppedAt        = uint64(block.timestamp);
+        s.state            = State.Dropped;
 
-        emit Dropped(storageId, s.droppedAt, dropCellHash, evidenceHash, evidenceCid);
+        emit Dropped(storageId, s.droppedAt, evidenceHash, evidenceCid);
     }
 
-    /// @notice Mark the item/container as picked from storage.
-    /// @dev Releases 1 unit back to the space capacity.
-    /// @dev Only the registered space operator may attest this transition.
-    function pick(uint256 storageId, bytes32 pickCellHash, bytes32 evidenceHash, string calldata evidenceCid) external {
+    /// @notice Operator attests that the item has left storage.
+    /// @dev Releases 1 capacity unit. Starts the 48h settlement window.
+    ///      Only the registered space operator may call.
+    function pick(
+        uint256 storageId,
+        bytes32 evidenceHash,
+        string calldata evidenceCid
+    ) external {
         StorageSession storage s = sessions[storageId];
         require(s.state == State.Dropped, "bad-state");
-
         _requireStorageOperator(s.spaceId);
 
-        // Release capacity as soon as the item leaves storage.
         registry.releaseOne(s.spaceId);
 
-        s.pickCellHash = pickCellHash;
-        s.evidenceHash = evidenceHash;
-        s.evidenceCid = evidenceCid;
-        s.pickedAt = uint64(block.timestamp);
+        s.pickEvidenceHash = evidenceHash;
+        s.pickEvidenceCid  = evidenceCid;
+        s.pickedAt         = uint64(block.timestamp);
+        s.finalizeAfter    = s.pickedAt + FINALIZE_WINDOW;
+        s.state            = State.Picked;
 
-        // Liveness window for finalize: allow immediate finalize after pick.
-        s.finalizeAfter = s.pickedAt;
-
-        s.state = State.Picked;
-
-        emit Picked(storageId, s.pickedAt, pickCellHash, evidenceHash, evidenceCid);
+        emit Picked(storageId, s.pickedAt, evidenceHash, evidenceCid, s.finalizeAfter);
     }
 
-    /// @notice Finalize settlement. Permissionless if escrowed (caller gets a tiny tip).
-    /// @dev If no escrow was used, this only finalizes state (the settlement happened off-chain).
+    /// @notice Picker confirms receipt — Proof of Custody (PoC).
+    ///
+    /// Primary settlement trigger. Escrow releases to the operator immediately.
+    /// If picker == dropper (same-person flow), the dropper calls this themselves.
+    ///
+    /// @dev If s.picker was set at session creation, only that address may confirm.
+    ///      If s.picker == address(0) (open pickup), any address may confirm.
+    function confirmPickup(uint256 storageId) external {
+        StorageSession storage s = sessions[storageId];
+        require(s.state == State.Picked, "bad-state");
+
+        if (s.picker != address(0)) {
+            require(msg.sender == s.picker, "not-picker");
+        }
+
+        emit PickupConfirmed(storageId, msg.sender, uint64(block.timestamp));
+
+        _settle(storageId, false);
+    }
+
+    /// @notice Permissionless finalize after 48h timeout.
+    ///
+    /// Anyone may call once finalizeAfter has elapsed.
+    /// Caller receives a small tip from escrow as a liveness incentive.
     function finalize(uint256 storageId) external {
         StorageSession storage s = sessions[storageId];
         require(s.state == State.Picked, "bad-state");
         require(block.timestamp >= s.finalizeAfter, "too-early");
 
-        // Determine operator payout address from registry at finalize-time.
+        _settle(storageId, true);
+    }
+
+    /// @dev Internal: release escrow to operator, or record state-only if no escrow.
+    function _settle(uint256 storageId, bool byTimeout) internal {
+        StorageSession storage s = sessions[storageId];
+
         (address operator,,,,,,,,) = registry.spaces(s.spaceId);
         require(operator != address(0), "no-space");
 
         if (s.escrowed && s.escrowAmount > 0) {
-            // Platform fee is always 0 in DROP (platform economics are off-chain).
-            // Protocol fee is immutable 0.5%.
             escrow.releaseWithFees(
                 storageId,
                 operator,
-                address(0),
-                0,
-                protocolTreasury,
-                PROTOCOL_FEE_BPS,
-                msg.sender,
-                finalizeTipBps
+                address(0), 0,                       // no platform fee at protocol level
+                protocolTreasury, PROTOCOL_FEE_BPS,
+                msg.sender, byTimeout ? finalizeTipBps : 0
             );
         }
 
         s.state = State.Finalized;
-        emit Finalized(storageId, operator);
-    }
-
-    /// @notice Dispute after drop or pick (platform-controlled).
-    /// @dev Arbitration is off-chain. Owner can resolve if you want a last-resort.
-    function dispute(uint256 storageId, bytes32 reasonHash) external {
-        StorageSession storage s = sessions[storageId];
-        require(msg.sender == s.platform, "not-platform");
-        require(s.state == State.Dropped || s.state == State.Picked, "bad-state");
-        s.state = State.Disputed;
-        emit Disputed(storageId, reasonHash);
-    }
-
-    /// @notice Owner resolution hook (optional deployment-level admin).
-    /// @dev If you want no admin, deploy with an owner you renounce.
-    function resolve(uint256 storageId, address winner) external onlyOwner {
-        StorageSession storage s = sessions[storageId];
-        require(s.state == State.Disputed, "bad-state");
-
-        (address operator,,,,,,,,) = registry.spaces(s.spaceId);
-        require(operator != address(0), "no-space");
-
-        if (s.escrowed && s.escrowAmount > 0) {
-            if (winner == operator) {
-                escrow.releaseWithFees(
-                    storageId,
-                    operator,
-                    address(0),
-                    0,
-                    protocolTreasury,
-                    PROTOCOL_FEE_BPS,
-                    msg.sender,
-                    0
-                );
-            } else {
-                escrow.refund(storageId, s.platform);
-            }
-        }
-
-        s.state = State.Finalized;
-        emit Resolved(storageId, winner);
-        emit Finalized(storageId, operator);
+        emit Finalized(storageId, operator, byTimeout);
     }
 }
