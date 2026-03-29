@@ -56,10 +56,10 @@ DROP enables storage settlement for platforms, logistics systems, supply chains,
 
 Official DROP Protocol contract addresses:
 
-* **DROPCore:** TBD
-* **DROPSpaceRegistry:** TBD
-* **Escrow:** reused from DeDe or platform deployment
-* **protocolTreasury:** 0x91118FF9671040631E26B2f4597E0b9b162890A0
+DROPCore:          0x924cC808389F0385dBe3F0248796147D85635338
+DROPSpaceRegistry: 0xfbf7Ed40f0FA992D2Ddc07250FE2D0e72Cbd12c9
+Escrow:            0x9e859D91C900F799F23F55FffCdAf389118a5766
+protocolTreasury:  0xcd89321D5a9080e417ac01c8F46F643548ad7C04
 
 ---
 
