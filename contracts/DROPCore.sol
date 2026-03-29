@@ -72,7 +72,7 @@ interface IEscrow {
 ///   Non-speculative infrastructure: possession = authority to advance state.
 ///
 /// ## Protocol fee
-///   Immutable 0.5% to protocolTreasury.
+///   Immutable 0.3% to protocolTreasury.
 ///   Platform fee is always 0 at protocol level, platform economics are off-chain.
 ///
 /// ## Philosophy
