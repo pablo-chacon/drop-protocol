@@ -76,7 +76,7 @@ Fractional Logistics conceptual workflow:
 Platform scaffolding, examples, and integrations are provided separately.
 
 **DROP Templates (platform examples, not SDKs):**  
-Link will be published in `DROP-Templates` repository.
+Link will be published in [DROP templates](https://github.com/pablo-chacon/drop-templates) repository.
 
 This repository intentionally contains **no SDKs, APIs, or platform helpers**.
 
