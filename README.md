@@ -67,7 +67,8 @@ Official DROP Protocol contract addresses:
 
 Fractional Logistics conceptual workflow:
 
-[micro-logistics.md](https://github.com/pablo-chacon/drop-protocol/blob/main/docs/micro-logisitcs.md)
+
+[Micro-logistics](https://github.com/pablo-chacon/drop-protocol/blob/main/docs/micro-logistics.md)
 
 ---
 
