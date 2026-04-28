@@ -213,7 +213,7 @@ State: **Finalized**
 
 When escrow is used, DROP enforces a fixed protocol fee:
 
-- 0.5% of the escrowed amount
+- 0.3% of the escrowed amount
 - immutable
 - routed to the protocol treasury
 - collected at finalize time
