@@ -236,18 +236,6 @@ DROP does not adopt your architecture.
 
 ---
 
-## **License**
-
-MIT License
-
-Copyright (c) 2025 Emil Karlsson
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
-
----
-
 ## **Contact**
 
 **Contact Email:** pablo-chacon-ai@proton.me
